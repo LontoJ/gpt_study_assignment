@@ -1,3 +1,5 @@
+import os
+
 import openai
 import streamlit as st
 from langchain.callbacks.base import BaseCallbackHandler
@@ -65,6 +67,9 @@ if st.session_state.api_key_valid:
     def embed_file(file):
         file_content = file.read()
         file_path = f"./.cache/files/{file.name}"
+
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
         with open(file_path, "wb") as f:
             f.write(file_content)
         cache_dir = LocalFileStore(f"./.cache/embeddings/{file.name}")
