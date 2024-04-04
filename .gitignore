@@ -1,0 +1,6 @@
+.venv/
+.env
+files/
+.cache/
+.idea/
+.streamlit/
