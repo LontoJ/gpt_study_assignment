@@ -75,7 +75,7 @@ if st.session_state.api_key_valid:
         )
         loader = UnstructuredFileLoader(file_path)
         docs = loader.load_and_split(text_splitter=splitter)
-        embeddings = OpenAIEmbeddings()
+        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
         cached_embeddings = CacheBackedEmbeddings.from_bytes_store(
             embeddings, cache_dir
         )
@@ -135,33 +135,33 @@ Upload your files on the sidebar.
 """
 )
 
-with st.sidebar:
-    file = st.file_uploader(
-        "Upload a .txt .pdf or .docx file",
-        type=["pdf", "txt", "docx"],
-    )
 
-if file:
-    retriever = embed_file(file)
-    send_message("I'm ready! Ask away!", "ai", save=False)
-    paint_history()
-    message = st.chat_input("Ask anything about your file...")
-    if message:
-        send_message(message, "human")
-        chain = (
-            {
-                "context": retriever | RunnableLambda(format_docs),
-                "question": RunnablePassthrough(),
-            }
-            | prompt
-            | llm
+if st.session_state.api_key_valid:
+    with st.sidebar:
+        file = st.file_uploader(
+            "Upload a .txt .pdf or .docx file",
+            type=["pdf", "txt", "docx"],
         )
-        with st.chat_message("ai"):
-            chain.invoke(message)
 
-
-else:
-    st.session_state["messages"] = []
+    if file:
+        retriever = embed_file(file)
+        send_message("I'm ready! Ask away!", "ai", save=False)
+        paint_history()
+        message = st.chat_input("Ask anything about your file...")
+        if message:
+            send_message(message, "human")
+            chain = (
+                {
+                    "context": retriever | RunnableLambda(format_docs),
+                    "question": RunnablePassthrough(),
+                }
+                | prompt
+                | llm
+            )
+            with st.chat_message("ai"):
+                chain.invoke(message)
+    else:
+        st.session_state["messages"] = []
 
 st.sidebar.markdown(
     f'<a href="https://github.com/LontoJ/gpt_study_assignment" target="blank">깃 허브 링크</a>',
