@@ -162,3 +162,8 @@ if file:
 
 else:
     st.session_state["messages"] = []
+
+st.sidebar.markdown(
+    f'<a href="https://github.com/LontoJ/gpt_study_assignment" target="blank">깃 허브 링크</a>',
+    unsafe_allow_html=True,
+)
