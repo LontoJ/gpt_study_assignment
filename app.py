@@ -1,58 +1,45 @@
-import json
-
 import openai
 import streamlit as st
-from langchain.callbacks import StreamingStdOutCallbackHandler
-from langchain.callbacks.base import BaseCallbackHandler
 from langchain.chat_models import ChatOpenAI
-from langchain.document_loaders import UnstructuredFileLoader
-from langchain.embeddings import CacheBackedEmbeddings, OpenAIEmbeddings
-from langchain.prompts import ChatPromptTemplate, PromptTemplate
-from langchain.retrievers import WikipediaRetriever
-from langchain.schema import BaseOutputParser, output_parser
+from langchain.document_loaders import SitemapLoader
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.prompts import ChatPromptTemplate
+from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores.faiss import FAISS
 
 st.set_page_config(
-    page_title="QuizGPT",
-    page_icon="❓",
+    page_title="SiteGPT",
+    page_icon="🖥️",
 )
 
-function = {
-    "name": "create_quiz",
-    "description": "function that takes a list of questions and answers and returns a quiz",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "questions": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "question": {
-                            "type": "string",
-                        },
-                        "answers": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "answer": {
-                                        "type": "string",
-                                    },
-                                    "correct": {
-                                        "type": "boolean",
-                                    },
-                                },
-                                "required": ["answer", "correct"],
-                            },
-                        },
-                    },
-                    "required": ["question", "answers"],
-                },
-            }
-        },
-        "required": ["questions"],
-    },
-}
+answers_prompt = ChatPromptTemplate.from_template(
+    """
+    Using ONLY the following context answer the user's question. If you can't just say you don't know, don't make anything up.
+                                                  
+    Then, give a score to the answer between 0 and 5.
+
+    If the answer answers the user question the score should be high, else it should be low.
+
+    Make sure to always include the answer's score even if it's 0.
+
+    Context: {context}
+                                                  
+    Examples:
+                                                  
+    Question: How far away is the moon?
+    Answer: The moon is 384,400 km away.
+    Score: 5
+                                                  
+    Question: How far away is the sun?
+    Answer: I don't know
+    Score: 0
+                                                  
+    Your turn!
+
+    Question: {question}
+"""
+)
 
 if "api_key_valid" not in st.session_state:
     st.session_state.api_key_valid = False
@@ -78,105 +65,145 @@ else:
 if st.session_state.api_key_valid:
     llm = ChatOpenAI(
         api_key=api_key,
-        model_name="gpt-4-turbo-preview",
+        model_name="gpt-3.5-turbo",
         temperature=0.1,
-        streaming=True,
-        callbacks=[StreamingStdOutCallbackHandler()],
-    ).bind(
-        function_call={
-            "name": "create_quiz",
-        },
-        functions=[
-            function,
+    )
+
+
+def get_answers(inputs):
+    docs = inputs["docs"]
+    question = inputs["question"]
+    answers_chain = answers_prompt | llm
+    return {
+        "question": question,
+        "answers": [
+            {
+                "answer": answers_chain.invoke(
+                    {"question": question, "context": doc.page_content}
+                ).content,
+                "source": doc.metadata["source"],
+                "date": doc.metadata["lastmod"],
+            }
+            for doc in docs
         ],
-    )
-
-
-def format_docs(docs):
-
-    return "\n\n".join(document.page_content for document in docs)
-
-
-st.title("QuizGPT")
-
-if st.session_state.api_key_valid:
-    formatting_prompt = PromptTemplate.from_template(
-        "{context}의 내용을 바탕으로 퀴즈를 만들어 주세요. 난이도 기준은 매우 쉬움 입니다. 모두 한국어로 만들어 주세요."
-    )
+    }
 
 
 if st.session_state.api_key_valid:
+    choose_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+                Use ONLY the following pre-existing answers to answer the user's question.
 
-    formatting_chain = formatting_prompt | llm
+                Use the answers that have the highest score (more helpful) and favor the most recent ones.
+
+                Cite sources and return the sources of the answers as they are, do not change them.
+
+                Answers: {answers}
+                """,
+            ),
+            ("human", "{question}"),
+        ]
+    )
 
 
-@st.cache_data(show_spinner="Making quiz...")
-def run_quiz_chain(_docs, topic):
-    chain = {
-        "context": format_docs,
-    } | formatting_chain
-    result = chain.invoke(_docs)
+def choose_answer(inputs):
+    answers = inputs["answers"]
+    question = inputs["question"]
+    choose_chain = choose_prompt | llm
+    condensed = "\n\n".join(
+        f"{answer['answer']}\nSource:{answer['source']}\nDate:{answer['date']}\n"
+        for answer in answers
+    )
+    return choose_chain.invoke(
+        {
+            "question": question,
+            "answers": condensed,
+        }
+    )
 
-    result_to_json = json.loads(result.additional_kwargs["function_call"]["arguments"])
 
-    return result_to_json
+def parse_page(soup):
+    header = soup.find("header")
+    footer = soup.find("footer")
+    if header:
+        header.decompose()
+    if footer:
+        footer.decompose()
+    return (
+        str(soup.get_text())
+        .replace("\n", " ")
+        .replace("\xa0", " ")
+        .replace("CloseSearch Submit Blog", "")
+    )
 
 
-@st.cache_data(show_spinner="Searching Wikipedia...")
-def wiki_search(term):
-    retriever = WikipediaRetriever(top_k_results=1, lang="ko")
-    docs = retriever.get_relevant_documents(term)
-    return docs
+@st.cache_data(show_spinner="Loading website...")
+def load_website(url, filter_value):
+    splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        chunk_size=1000,
+        chunk_overlap=200,
+    )
+    loader = SitemapLoader(
+        url,
+        filter_urls=[filter_value],
+        parsing_function=parse_page,
+    )
+    loader.requests_per_second = 2
+    docs = loader.load_and_split(text_splitter=splitter)
+    vector_store = FAISS.from_documents(
+        docs,
+        OpenAIEmbeddings(
+            api_key=api_key,
+        ),
+    )
+    return vector_store.as_retriever()
+
+
+st.markdown(
+    """
+    # SiteGPT
+            
+    Ask questions about the content of a website.
+            
+    Start by writing the URL of the website on the sidebar.
+"""
+)
 
 
 with st.sidebar:
-    docs = None
-    topic = None
-    topic = st.text_input("Search Wikipedia...")
-    difficulty_options = ["쉬움", "보통", "어려움"]
-    selected_difficulty = st.sidebar.selectbox(
-        "퀴즈의 난이도를 선택하세요.", difficulty_options
+    choice = st.selectbox(
+        "Select an option:",
+        options=[None, "AI Gateway", "Cloudflare Vectorize", "Workers AI"],
+        index=0,  # 첫 번째 옵션(None)이 기본 선택
+        format_func=lambda x: (
+            "Please select an option" if x is None else x
+        ),  # None 대신 표시할 텍스트
     )
-    if topic:
-        docs = wiki_search(topic)
 
-all_correct = True
-
-if not topic or not selected_difficulty:
-    st.markdown(
-        """
-    Welcome to QuizGPT.
-                
-    I will make a quiz from Wikipedia articles or files you upload to test your knowledge and help you study.
-                
-    Get started by uploading a file or searching on Wikipedia in the sidebar.
-    """
+if choice:
+    # 선택에 따라 filter_urls의 값 설정
+    filter_value = ""
+    if choice == "AI Gateway":
+        filter_value = r"^(.*\/ai-gateway\/).*"
+    elif choice == "Cloudflare Vectorize":
+        filter_value = r"^(.*\/vectorize\/).*"
+    elif choice == "Workers AI":
+        filter_value = r"^(.*\/workers-ai\/).*"
+    retriever = load_website(
+        "https://developers.cloudflare.com/sitemap.xml", filter_value
     )
-else:
-    response = run_quiz_chain(docs, topic)
-
-    with st.form("questions_form"):
-        for question in response["questions"]:
-            st.write(question["question"])
-            value = st.radio(
-                "Select an option.",
-                [answer["answer"] for answer in question["answers"]],
-                index=None,
-            )
-            if {"answer": value, "correct": True} in question["answers"]:
-                st.success("Correct!")
-            elif value is not None:
-                st.error("Wrong!")
-                all_correct = False
-
-        button = st.form_submit_button()
-
-        if button:
-            if all_correct:
-                st.balloons()
-
-
-st.sidebar.markdown(
-    f'<a href="https://github.com/LontoJ/gpt_study_assignment" target="blank">깃 허브 링크</a>',
-    unsafe_allow_html=True,
-)
+    query = st.text_input("Ask a question to the website.")
+    if query:
+        chain = (
+            {
+                "docs": retriever,
+                "question": RunnablePassthrough(),
+            }
+            | RunnableLambda(get_answers)
+            | RunnableLambda(choose_answer)
+        )
+        result = chain.invoke(query)
+        st.markdown(result.content.replace("$", "\$"))
