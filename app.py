@@ -175,7 +175,7 @@ st.markdown(
 
 with st.sidebar:
     choice = st.selectbox(
-        "Select an option:",
+        "검색할 문서를 선택하세요:",
         options=[None, "AI Gateway", "Cloudflare Vectorize", "Workers AI"],
         index=0,  # 첫 번째 옵션(None)이 기본 선택
         format_func=lambda x: (
